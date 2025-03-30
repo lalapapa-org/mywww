@@ -1,4 +1,6 @@
 import 'dart:collection';
+import 'dart:async';
+import 'dart:io';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
@@ -11,10 +13,10 @@ class Browser extends StatefulWidget {
   const Browser({super.key});
 
   @override
-  _BrowserState createState() => _BrowserState();
+  BrowserState createState() => BrowserState();
 }
 
-class _BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
+class BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
   final GlobalKey webViewKey = GlobalKey();
 
   InAppWebViewController? webViewController;
@@ -35,13 +37,20 @@ class _BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
 
   Offset mousePosition = Offset(200, 200);
   Offset targetMousePosition = Offset(200, 200);
-  late Offset _velocity; // 添加速度变量
-  final double moveStep = 10.0; // 每次移动的步长
+  late Offset _velocity;
+  final double moveStep = 10.0;
 
   late AnimationController _animationController;
   late Animation<Offset> _animation;
 
-  final FocusNode textFieldFocusNode = FocusNode(); // 添加 FocusNode
+  final FocusNode textFieldFocusNode = FocusNode();
+
+  Timer? _longPressTimer; // 定时器，用于处理长按超过半秒后的持续移动
+  bool _isLongPressActive = false; // 标记长按是否激活
+  bool _isKeyPressed = false; // 标记按键是否被按下
+
+  bool _isEditing = false; // 标记是否处于编辑状态
+  String _labelText = "https://google.com"; // Label 显示的文本
 
   @override
   void initState() {
@@ -89,65 +98,143 @@ class _BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
               },
             );
 
-    // 监听遥控器按键事件
-    RawKeyboard.instance.addListener(_handleKeyEvent);
+    HardwareKeyboard.instance.addHandler(
+      _handleKeyEvent,
+    ); // 使用 HardwareKeyboard 添加事件处理
   }
 
   @override
   void dispose() {
+    _longPressTimer?.cancel(); // 释放长按定时器
     _animationController.dispose();
     textFieldFocusNode.dispose();
-    RawKeyboard.instance.removeListener(_handleKeyEvent);
+    HardwareKeyboard.instance.removeHandler(_handleKeyEvent); // 移除事件处理
     super.dispose();
   }
 
-  void _handleKeyEvent(RawKeyEvent event) {
-    if (event is RawKeyDownEvent) {
+  bool _handleKeyEvent(KeyEvent event) {
+    if (event is KeyDownEvent) {
+      if (!_isKeyPressed &&
+          (event.logicalKey == LogicalKeyboardKey.arrowUp ||
+              event.logicalKey == LogicalKeyboardKey.arrowDown ||
+              event.logicalKey == LogicalKeyboardKey.arrowLeft ||
+              event.logicalKey == LogicalKeyboardKey.arrowRight)) {
+        _isKeyPressed = true; // 标记按键被按下
+        _isLongPressActive = false; // 重置长按激活状态
+
+        // 执行原来的移动一步逻辑
+        setState(() {
+          _updateVelocity(event.logicalKey);
+          _updateTargetPosition();
+        });
+
+        // 启动定时器，半秒后激活长按持续移动
+        _longPressTimer = Timer(const Duration(milliseconds: 500), () {
+          _isLongPressActive = true;
+          _startContinuousMovement();
+        });
+      }
+
       setState(() {
-        Offset newTargetPosition = targetMousePosition;
-        if (event.logicalKey == LogicalKeyboardKey.arrowUp) {
-          _velocity = Offset(0, -moveStep); // 设置向上的速度
-        } else if (event.logicalKey == LogicalKeyboardKey.arrowDown) {
-          _velocity = Offset(0, moveStep); // 设置向下的速度
-        } else if (event.logicalKey == LogicalKeyboardKey.arrowLeft) {
-          _velocity = Offset(-moveStep, 0); // 设置向左的速度
-        } else if (event.logicalKey == LogicalKeyboardKey.arrowRight) {
-          _velocity = Offset(moveStep, 0); // 设置向右的速度
+        if (event.logicalKey == LogicalKeyboardKey.arrowUp ||
+            event.logicalKey == LogicalKeyboardKey.arrowDown ||
+            event.logicalKey == LogicalKeyboardKey.arrowLeft ||
+            event.logicalKey == LogicalKeyboardKey.arrowRight) {
+          _updateVelocity(event.logicalKey); // 更新速度
         } else if (event.logicalKey == LogicalKeyboardKey.select) {
-          _simulateMouseClick();
-        } else if (event.logicalKey == LogicalKeyboardKey.goBack ||
-            event.logicalKey == LogicalKeyboardKey.escape) {
-          webViewController?.goBack();
-        }
-
-        // 根据速度计算新的目标位置
-        newTargetPosition = targetMousePosition + _velocity;
-
-        // 获取屏幕尺寸
-        final screenSize = MediaQuery.of(context).size;
-
-        // 限制目标位置在屏幕范围内
-        newTargetPosition = Offset(
-          newTargetPosition.dx.clamp(0, screenSize.width),
-          newTargetPosition.dy.clamp(0, screenSize.height),
-        );
-
-        // 更新目标位置并启动动画
-        if (newTargetPosition != targetMousePosition) {
-          targetMousePosition = newTargetPosition;
-          _animation = Tween<Offset>(
-            begin: mousePosition,
-            end: targetMousePosition,
-          ).animate(
-            CurvedAnimation(
-              parent: _animationController,
-              curve: Curves.easeOutQuad, // 使用更平滑的曲线
-            ),
-          );
-          _animationController.forward(from: 0.0);
+          _simulateMouseClick(); // 保留 select 按键逻辑
         }
       });
+    } else if (event is KeyUpEvent &&
+        (event.logicalKey == LogicalKeyboardKey.arrowUp ||
+            event.logicalKey == LogicalKeyboardKey.arrowDown ||
+            event.logicalKey == LogicalKeyboardKey.arrowLeft ||
+            event.logicalKey == LogicalKeyboardKey.arrowRight)) {
+      _isKeyPressed = false; // 按键释放时重置标记
+      _isLongPressActive = false; // 停止长按激活状态
+      _longPressTimer?.cancel(); // 停止长按定时器
+      _velocity = Offset.zero; // 停止移动
     }
+    return false; // 返回 false 表示未拦截事件
+  }
+
+  void _startContinuousMovement() {
+    if (_isLongPressActive) {
+      Timer.periodic(const Duration(milliseconds: 50), (timer) {
+        if (!_isLongPressActive) {
+          timer.cancel(); // 停止定时器
+          return;
+        }
+        setState(() {
+          _updateTargetPosition(); // 持续更新目标位置
+        });
+      });
+    }
+  }
+
+  void _updateVelocity(LogicalKeyboardKey key) {
+    double currentMoveStep =
+        _isKeyPressed ? moveStep * (_isLongPressActive ? 1.5 : 1.0) : moveStep;
+
+    if (key == LogicalKeyboardKey.arrowUp) {
+      _velocity = Offset(0, -currentMoveStep); // 设置向上的速度
+    } else if (key == LogicalKeyboardKey.arrowDown) {
+      _velocity = Offset(0, currentMoveStep); // 设置向下的速度
+    } else if (key == LogicalKeyboardKey.arrowLeft) {
+      _velocity = Offset(-currentMoveStep, 0); // 设置向左的速度
+    } else if (key == LogicalKeyboardKey.arrowRight) {
+      _velocity = Offset(currentMoveStep, 0); // 设置向右的速度
+    }
+  }
+
+  void _updateTargetPosition() {
+    Offset newTargetPosition = targetMousePosition + _velocity;
+
+    // 获取屏幕尺寸
+    final screenSize = MediaQuery.of(context).size;
+
+    // 限制目标位置在屏幕范围内
+    newTargetPosition = Offset(
+      newTargetPosition.dx.clamp(0, screenSize.width),
+      newTargetPosition.dy.clamp(0, screenSize.height),
+    );
+
+    // 更新目标位置并启动动画
+    if (newTargetPosition != targetMousePosition) {
+      targetMousePosition = newTargetPosition;
+      _animation = Tween<Offset>(
+        begin: mousePosition,
+        end: targetMousePosition,
+      ).animate(
+        CurvedAnimation(
+          parent: _animationController,
+          curve: Curves.easeOutQuad, // 使用更平滑的曲线
+        ),
+      );
+      _animationController.forward(from: 0.0);
+    }
+  }
+
+  Future<bool> _handlePop() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder:
+          (context) => AlertDialog(
+            title: const Text('确认退出？'),
+            content: const Text('确认要对退出吗?'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('取消'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('确定'),
+              ),
+            ],
+          ),
+    );
+    return confirm ?? false; // 用户点击确定时返回true
   }
 
   void _simulateMouseClick() {
@@ -170,16 +257,32 @@ class _BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
 
   @override
   Widget build(BuildContext context) {
-    return WillPopScope(
-      onWillPop: () async {
-        if (webViewController != null) {
-          bool canGoBack = await webViewController!.canGoBack();
-          if (canGoBack) {
-            webViewController?.goBack();
-            return false; // 阻止退出
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) async {
+        // 修改为 onPopInvokedWithResult [[1]][[2]]
+        if (didPop) return; // 已处理弹出则直接返回
+
+        if (_isEditing) {
+          setState(() {
+            _isEditing = false;
+          });
+          return;
+        }
+
+        bool canGoBack = await webViewController!.canGoBack();
+        if (canGoBack) {
+          webViewController?.goBack();
+
+          return;
+        }
+
+        final allowed = await _handlePop();
+        if (allowed && mounted) {
+          if (context.mounted) {
+            exit(0);
           }
         }
-        return false; // 还是不允许退出
       },
       child: Scaffold(
         appBar: AppBar(title: Text("InAppWebView")),
@@ -188,32 +291,58 @@ class _BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
             children: [
               Column(
                 children: <Widget>[
-                  TextField(
-                    focusNode: textFieldFocusNode, // 绑定 FocusNode
-                    decoration: InputDecoration(prefixIcon: Icon(Icons.search)),
-                    controller: urlController,
-                    keyboardType: TextInputType.text,
-                    onSubmitted: (value) {
-                      var url = WebUri(value);
-                      if (url.scheme.isEmpty) {
-                        url = WebUri(
-                          (!kIsWeb
-                                  ? "https://www.google.com/search?q="
-                                  : "https://www.bing.com/search?q=") +
-                              value,
-                        );
-                      }
-                      webViewController?.loadUrl(
-                        urlRequest: URLRequest(url: url),
-                      );
+                  GestureDetector(
+                    onTap: () {
+                      setState(() {
+                        _isEditing = true; // 切换到编辑状态
+                        textFieldFocusNode.requestFocus();
+                      });
                     },
+                    child:
+                        _isEditing
+                            ? Row(
+                              children: [
+                                Expanded(
+                                  child: TextField(
+                                    focusNode:
+                                        textFieldFocusNode, // 绑定 FocusNode
+                                    decoration: InputDecoration(
+                                      border: OutlineInputBorder(), // 添加边框
+                                    ),
+                                    controller: urlController,
+                                    autofocus: true, // 自动获取焦点
+                                    onSubmitted: (value) {
+                                      _submitUrl(value);
+                                    },
+                                  ),
+                                ),
+                                TextButton(
+                                  onPressed: () {
+                                    _submitUrl(urlController.text);
+                                  },
+                                  child: const Text("确定"),
+                                ),
+                              ],
+                            )
+                            : Container(
+                              width: double.infinity, // 设置宽度为 100%
+                              padding: const EdgeInsets.all(8.0),
+                              decoration: BoxDecoration(
+                                border: Border.all(color: Colors.grey), // 添加边框
+                                borderRadius: BorderRadius.circular(4.0),
+                              ),
+                              child: Text(
+                                _labelText,
+                                style: const TextStyle(fontSize: 16.0),
+                              ),
+                            ),
                   ),
                   Expanded(
                     child: GestureDetector(
                       behavior: HitTestBehavior.opaque, // 确保点击事件传递到子组件
                       onTap: () {
-                        // 确保点击页面时 TextField 不会获取焦点
-                        textFieldFocusNode.unfocus();
+                        textFieldFocusNode
+                            .unfocus(); // 确保点击页面时 TextField 不会获取焦点
                       },
                       child: Stack(
                         children: [
@@ -221,7 +350,7 @@ class _BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
                             key: webViewKey,
                             webViewEnvironment: webViewEnvironment,
                             initialUrlRequest: URLRequest(
-                              url: WebUri('https://google.com'),
+                              url: WebUri(_labelText),
                             ),
                             initialUserScripts:
                                 UnmodifiableListView<UserScript>([]),
@@ -234,6 +363,7 @@ class _BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
                               setState(() {
                                 this.url = url.toString();
                                 urlController.text = this.url;
+                                _labelText = this.url; // 更新 Label 文本
                               });
                             },
                             onPermissionRequest: (controller, request) {
@@ -335,15 +465,15 @@ class _BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
                 ],
               ),
               Positioned(
-                left: mousePosition.dx - 5,
-                top: mousePosition.dy - 5,
+                left: mousePosition.dx - 8,
+                top: mousePosition.dy - 8,
                 child: IgnorePointer(
                   ignoring: true, // 允许点击事件透传
                   child: Container(
-                    width: 20,
-                    height: 20,
+                    width: 16,
+                    height: 16,
                     decoration: BoxDecoration(
-                      border: Border.all(color: Colors.red, width: 2), // 空心圆边框
+                      border: Border.all(color: Colors.red, width: 6), // 空心圆边框
                       shape: BoxShape.circle,
                     ),
                   ),
@@ -354,5 +484,22 @@ class _BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
         ),
       ),
     );
+  }
+
+  void _submitUrl(String value) {
+    setState(() {
+      _isEditing = false; // 退出编辑状态
+      _labelText = value; // 更新 Label 文本
+    });
+    var url = WebUri(value);
+    if (url.scheme.isEmpty) {
+      url = WebUri(
+        (!kIsWeb
+                ? "https://www.google.com/search?q="
+                : "https://www.bing.com/search?q=") +
+            value,
+      );
+    }
+    webViewController?.loadUrl(urlRequest: URLRequest(url: url));
   }
 }
