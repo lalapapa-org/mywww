@@ -38,7 +38,7 @@ class BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
   Offset mousePosition = Offset(200, 200);
   Offset targetMousePosition = Offset(200, 200);
   late Offset _velocity;
-  final double moveStep = 10.0;
+  final double moveStep = 8.0;
 
   late AnimationController _animationController;
   late Animation<Offset> _animation;
@@ -46,6 +46,8 @@ class BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
   final FocusNode textFieldFocusNode = FocusNode();
 
   Timer? _longPressTimer; // 定时器，用于处理长按超过半秒后的持续移动
+  Timer? _speedIncreaseTimer; // 定时器，用于增加速度
+  double _currentAccelerationFactor = 1.0; // 当前加速因子
   bool _isLongPressActive = false; // 标记长按是否激活
   bool _isKeyPressed = false; // 标记按键是否被按下
 
@@ -106,6 +108,7 @@ class BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
   @override
   void dispose() {
     _longPressTimer?.cancel(); // 释放长按定时器
+    _speedIncreaseTimer?.cancel(); // 释放速度增加定时器
     _animationController.dispose();
     textFieldFocusNode.dispose();
     HardwareKeyboard.instance.removeHandler(_handleKeyEvent); // 移除事件处理
@@ -153,6 +156,7 @@ class BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
       _isKeyPressed = false; // 按键释放时重置标记
       _isLongPressActive = false; // 停止长按激活状态
       _longPressTimer?.cancel(); // 停止长按定时器
+      _speedIncreaseTimer?.cancel(); // 停止速度增加定时器
       _velocity = Offset.zero; // 停止移动
     }
     return false; // 返回 false 表示未拦截事件
@@ -160,9 +164,23 @@ class BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
 
   void _startContinuousMovement() {
     if (_isLongPressActive) {
+      _currentAccelerationFactor = 1.0; // 重置加速因子
+      _speedIncreaseTimer = Timer.periodic(const Duration(milliseconds: 500), (
+        timer,
+      ) {
+        if (!_isLongPressActive) {
+          timer.cancel(); // 停止定时器
+          return;
+        }
+        setState(() {
+          _currentAccelerationFactor += 0.5; // 每半秒增加加速因子
+        });
+      });
+
       Timer.periodic(const Duration(milliseconds: 50), (timer) {
         if (!_isLongPressActive) {
           timer.cancel(); // 停止定时器
+          _speedIncreaseTimer?.cancel(); // 停止速度增加定时器
           return;
         }
         setState(() {
@@ -173,8 +191,7 @@ class BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
   }
 
   void _updateVelocity(LogicalKeyboardKey key) {
-    double currentMoveStep =
-        _isKeyPressed ? moveStep * (_isLongPressActive ? 1.5 : 1.0) : moveStep;
+    double currentMoveStep = moveStep * _currentAccelerationFactor; // 使用动态加速因子
 
     if (key == LogicalKeyboardKey.arrowUp) {
       _velocity = Offset(0, -currentMoveStep); // 设置向上的速度
