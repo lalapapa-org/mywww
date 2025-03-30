@@ -48,6 +48,13 @@ class MainApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(home: Scaffold(body: Browser()));
+    return MaterialApp(
+      home: Scaffold(
+        body: Focus(
+          autofocus: true, // 确保遥控器按键事件能够被捕获
+          child: Browser(),
+        ),
+      ),
+    );
   }
 }
