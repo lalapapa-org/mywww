@@ -1,6 +1,7 @@
 import 'dart:collection';
 import 'dart:async';
 import 'dart:io';
+import 'dart:convert';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
@@ -8,6 +9,7 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:mywww/main.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 
 class Browser extends StatefulWidget {
   const Browser({super.key});
@@ -54,9 +56,16 @@ class BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
   bool _isEditing = false; // 标记是否处于编辑状态
   String _labelText = "https://google.com"; // Label 显示的文本
 
+  List<String> _favorites = []; // 收藏的网址列表
+
+  String? _favoritesFilePath; // 收藏文件路径
+
   @override
   void initState() {
     super.initState();
+
+    _initializeFavoritesFilePath(); // 初始化收藏文件路径
+    _loadFavoritesFromDisk(); // 启动时加载收藏列表
 
     _velocity = Offset.zero; // 初始化速度
     _animationController = AnimationController(
@@ -113,6 +122,13 @@ class BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
     textFieldFocusNode.dispose();
     HardwareKeyboard.instance.removeHandler(_handleKeyEvent); // 移除事件处理
     super.dispose();
+  }
+
+  Future<void> _initializeFavoritesFilePath() async {
+    final directory = await getApplicationDocumentsDirectory(); // 获取平台支持的文档目录
+    setState(() {
+      _favoritesFilePath = '${directory.path}/favorites.json'; // 设置收藏文件路径
+    });
   }
 
   bool _handleKeyEvent(KeyEvent event) {
@@ -210,10 +226,13 @@ class BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
     // 获取屏幕尺寸
     final screenSize = MediaQuery.of(context).size;
 
-    // 限制目标位置在屏幕范围内
+    // 限制目标位置在屏幕范围内，包括 AppBar 区域
     newTargetPosition = Offset(
       newTargetPosition.dx.clamp(0, screenSize.width),
-      newTargetPosition.dy.clamp(0, screenSize.height),
+      newTargetPosition.dy.clamp(
+        0,
+        screenSize.height + kToolbarHeight,
+      ), // 允许移动到 AppBar 区域
     );
 
     // 更新目标位置并启动动画
@@ -272,12 +291,75 @@ class BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
     GestureBinding.instance.handlePointerEvent(upPointer);
   }
 
+  Future<void> _loadFavoritesFromDisk() async {
+    if (_favoritesFilePath == null) {
+      await _initializeFavoritesFilePath(); // 等待路径初始化完成
+    }
+    try {
+      final file = File(_favoritesFilePath!);
+      if (await file.exists()) {
+        final content = await file.readAsString();
+        final List<dynamic> jsonList = jsonDecode(content);
+        setState(() {
+          _favorites = jsonList.cast<String>(); // 加载收藏列表
+        });
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        print("Failed to load favorites: $e");
+      }
+    }
+  }
+
+  Future<void> _saveFavoritesToDisk() async {
+    if (_favoritesFilePath == null) return; // 确保路径已初始化
+    try {
+      final file = File(_favoritesFilePath!);
+      await file.writeAsString(jsonEncode(_favorites)); // 保存收藏列表到文件
+    } catch (e) {
+      if (kDebugMode) {
+        print("Failed to save favorites: $e");
+      }
+    }
+  }
+
+  void _addToFavorites(String url) {
+    setState(() {
+      if (!_favorites.contains(url)) {
+        _favorites.add(url); // 添加到收藏列表
+        _saveFavoritesToDisk(); // 保存到磁盘
+      }
+    });
+  }
+
+  void _toggleFavorite(String url) {
+    setState(() {
+      if (_favorites.contains(url)) {
+        _favorites.remove(url); // 取消收藏
+      } else {
+        _favorites.add(url); // 添加到收藏列表
+      }
+      _saveFavoritesToDisk(); // 更新磁盘存储
+    });
+  }
+
+  bool _isFavorite(String url) {
+    return _favorites.contains(url); // 判断是否已收藏
+  }
+
+  void _loadFromFavorites(String url) {
+    setState(() {
+      _labelText = url; // 更新 Label 文本
+      urlController.text = url;
+    });
+    webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
+  }
+
   @override
   Widget build(BuildContext context) {
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, result) async {
-        // 修改为 onPopInvokedWithResult [[1]][[2]]
         if (didPop) return; // 已处理弹出则直接返回
 
         if (_isEditing) {
@@ -308,19 +390,19 @@ class BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
             children: [
               Column(
                 children: <Widget>[
-                  GestureDetector(
-                    onTap: () {
-                      setState(() {
-                        _isEditing = true; // 切换到编辑状态
-                        textFieldFocusNode.requestFocus();
-                      });
-                    },
-                    child:
-                        _isEditing
-                            ? Row(
-                              children: [
-                                Expanded(
-                                  child: TextField(
+                  Row(
+                    children: [
+                      Expanded(
+                        child: GestureDetector(
+                          onTap: () {
+                            setState(() {
+                              _isEditing = true; // 切换到编辑状态
+                              textFieldFocusNode.requestFocus();
+                            });
+                          },
+                          child:
+                              _isEditing
+                                  ? TextField(
                                     focusNode:
                                         textFieldFocusNode, // 绑定 FocusNode
                                     decoration: InputDecoration(
@@ -331,28 +413,67 @@ class BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
                                     onSubmitted: (value) {
                                       _submitUrl(value);
                                     },
+                                  )
+                                  : Container(
+                                    width: double.infinity, // 设置宽度为 100%
+                                    padding: const EdgeInsets.all(8.0),
+                                    decoration: BoxDecoration(
+                                      border: Border.all(
+                                        color: Colors.grey,
+                                      ), // 添加边框
+                                      borderRadius: BorderRadius.circular(4.0),
+                                    ),
+                                    child: Text(
+                                      _labelText,
+                                      style: const TextStyle(fontSize: 16.0),
+                                    ),
                                   ),
-                                ),
-                                TextButton(
-                                  onPressed: () {
-                                    _submitUrl(urlController.text);
-                                  },
-                                  child: const Text("确定"),
-                                ),
-                              ],
-                            )
-                            : Container(
-                              width: double.infinity, // 设置宽度为 100%
-                              padding: const EdgeInsets.all(8.0),
-                              decoration: BoxDecoration(
-                                border: Border.all(color: Colors.grey), // 添加边框
-                                borderRadius: BorderRadius.circular(4.0),
-                              ),
-                              child: Text(
-                                _labelText,
-                                style: const TextStyle(fontSize: 16.0),
+                        ),
+                      ),
+                      IconButton(
+                        icon: Icon(
+                          Icons.favorite,
+                          color:
+                              _isFavorite(_labelText)
+                                  ? Colors.red
+                                  : Colors.grey, // 未收藏时显示灰色
+                        ),
+                        onPressed: () {
+                          _toggleFavorite(_labelText); // 切换收藏状态
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(
+                                _isFavorite(_labelText)
+                                    ? "已收藏: $_labelText"
+                                    : "已取消收藏: $_labelText",
                               ),
                             ),
+                          );
+                        },
+                      ),
+                      IconButton(
+                        icon: Icon(Icons.list),
+                        onPressed: () {
+                          showModalBottomSheet(
+                            context: context,
+                            builder: (context) {
+                              return ListView(
+                                children:
+                                    _favorites.map((url) {
+                                      return ListTile(
+                                        title: Text(url),
+                                        onTap: () {
+                                          Navigator.pop(context); // 关闭底部弹窗
+                                          _loadFromFavorites(url); // 加载收藏的网址
+                                        },
+                                      );
+                                    }).toList(),
+                              );
+                            },
+                          );
+                        },
+                      ),
+                    ],
                   ),
                   Expanded(
                     child: GestureDetector(
