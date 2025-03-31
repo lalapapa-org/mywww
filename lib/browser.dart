@@ -52,6 +52,8 @@ class BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
   double _currentAccelerationFactor = 1.0; // 当前加速因子
   bool _isLongPressActive = false; // 标记长按是否激活
   bool _isKeyPressed = false; // 标记按键是否被按下
+  int _lastLeftKeyPressedAt = DateTime.now().millisecondsSinceEpoch;
+  int _lastRightKeyPressedAt = DateTime.now().millisecondsSinceEpoch;
 
   bool _isEditing = false; // 标记是否处于编辑状态
   String _labelText = "https://google.com"; // Label 显示的文本
@@ -59,6 +61,10 @@ class BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
   List<String> _favorites = []; // 收藏的网址列表
 
   String? _favoritesFilePath; // 收藏文件路径
+
+  bool _isScrollMode = false; // 标记是否处于滚动模式
+
+  String _message = ""; // 用于显示的消息
 
   @override
   void initState() {
@@ -131,27 +137,85 @@ class BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
     });
   }
 
+  void _simulateMouseScroll(Offset scrollDelta) {
+    if (webViewController != null) {
+      webViewController!.evaluateJavascript(
+        source: """
+        window.scrollBy(${scrollDelta.dx}, ${scrollDelta.dy});
+      """,
+      ); // 使用 JavaScript 滚动页面
+    }
+  }
+
   bool _handleKeyEvent(KeyEvent event) {
     if (event is KeyDownEvent) {
-      if (!_isKeyPressed &&
-          (event.logicalKey == LogicalKeyboardKey.arrowUp ||
-              event.logicalKey == LogicalKeyboardKey.arrowDown ||
-              event.logicalKey == LogicalKeyboardKey.arrowLeft ||
-              event.logicalKey == LogicalKeyboardKey.arrowRight)) {
-        _isKeyPressed = true; // 标记按键被按下
-        _isLongPressActive = false; // 重置长按激活状态
+      if (event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+        _lastLeftKeyPressedAt = DateTime.now().millisecondsSinceEpoch;
+      }
 
-        // 执行原来的移动一步逻辑
+      if (event.logicalKey == LogicalKeyboardKey.arrowRight) {
+        _lastRightKeyPressedAt = DateTime.now().millisecondsSinceEpoch;
+      }
+
+      var now = DateTime.now().millisecondsSinceEpoch;
+
+      if (((now - _lastLeftKeyPressedAt < 300 &&
+              now - _lastRightKeyPressedAt < 300)) ||
+          event.logicalKey == LogicalKeyboardKey.browserFavorites) {
         setState(() {
-          _updateVelocity(event.logicalKey);
-          _updateTargetPosition();
+          _isScrollMode = !_isScrollMode; // 切换滚动模式
         });
+      }
 
-        // 启动定时器，半秒后激活长按持续移动
-        _longPressTimer = Timer(const Duration(milliseconds: 500), () {
-          _isLongPressActive = true;
-          _startContinuousMovement();
-        });
+      if (_isScrollMode) {
+        // 滚动模式下发送模拟鼠标滚动消息
+        if (!_isKeyPressed &&
+            (event.logicalKey == LogicalKeyboardKey.arrowUp ||
+                event.logicalKey == LogicalKeyboardKey.arrowDown ||
+                event.logicalKey == LogicalKeyboardKey.arrowLeft ||
+                event.logicalKey == LogicalKeyboardKey.arrowRight)) {
+          _isKeyPressed = true; // 标记按键被按下
+          _isLongPressActive = false; // 重置长按激活状态
+
+          // 启动定时器，半秒后激活长按持续滚动
+          _longPressTimer = Timer(const Duration(milliseconds: 500), () {
+            _isLongPressActive = true;
+            _startContinuousScroll(event.logicalKey);
+          });
+        }
+
+        Offset scrollDelta = Offset.zero;
+        if (event.logicalKey == LogicalKeyboardKey.arrowUp) {
+          scrollDelta = Offset(0, -10); // 向上滚动
+        } else if (event.logicalKey == LogicalKeyboardKey.arrowDown) {
+          scrollDelta = Offset(0, 10); // 向下滚动
+        } else if (event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+          scrollDelta = Offset(-10, 0); // 向左滚动
+        } else if (event.logicalKey == LogicalKeyboardKey.arrowRight) {
+          scrollDelta = Offset(10, 0); // 向右滚动
+        }
+        _simulateMouseScroll(scrollDelta);
+      } else {
+        if (!_isKeyPressed &&
+            (event.logicalKey == LogicalKeyboardKey.arrowUp ||
+                event.logicalKey == LogicalKeyboardKey.arrowDown ||
+                event.logicalKey == LogicalKeyboardKey.arrowLeft ||
+                event.logicalKey == LogicalKeyboardKey.arrowRight)) {
+          _isKeyPressed = true; // 标记按键被按下
+          _isLongPressActive = false; // 重置长按激活状态
+
+          // 普通模式下执行原来的移动逻辑
+          setState(() {
+            _updateVelocity(event.logicalKey);
+            _updateTargetPosition();
+          });
+
+          // 启动定时器，半秒后激活长按持续移动
+          _longPressTimer = Timer(const Duration(milliseconds: 500), () {
+            _isLongPressActive = true;
+            _startContinuousMovement();
+          });
+        }
       }
 
       setState(() {
@@ -164,18 +228,53 @@ class BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
           _simulateMouseClick(); // 保留 select 按键逻辑
         }
       });
-    } else if (event is KeyUpEvent &&
-        (event.logicalKey == LogicalKeyboardKey.arrowUp ||
-            event.logicalKey == LogicalKeyboardKey.arrowDown ||
-            event.logicalKey == LogicalKeyboardKey.arrowLeft ||
-            event.logicalKey == LogicalKeyboardKey.arrowRight)) {
-      _isKeyPressed = false; // 按键释放时重置标记
-      _isLongPressActive = false; // 停止长按激活状态
-      _longPressTimer?.cancel(); // 停止长按定时器
-      _speedIncreaseTimer?.cancel(); // 停止速度增加定时器
-      _velocity = Offset.zero; // 停止移动
+    } else if (event is KeyUpEvent) {
+      if (event.logicalKey == LogicalKeyboardKey.arrowUp ||
+          event.logicalKey == LogicalKeyboardKey.arrowDown ||
+          event.logicalKey == LogicalKeyboardKey.arrowLeft ||
+          event.logicalKey == LogicalKeyboardKey.arrowRight) {
+        _isKeyPressed = false; // 按键释放时重置标记
+        _isLongPressActive = false; // 停止长按激活状态
+        _longPressTimer?.cancel(); // 停止长按定时器
+        _speedIncreaseTimer?.cancel(); // 停止速度增加定时器
+        _velocity = Offset.zero; // 停止移动
+      }
     }
     return false; // 返回 false 表示未拦截事件
+  }
+
+  void _startContinuousScroll(LogicalKeyboardKey key) {
+    double currentScrollStep = 10.0; // 初始滚动步长
+    _speedIncreaseTimer = Timer.periodic(const Duration(milliseconds: 500), (
+      timer,
+    ) {
+      if (!_isLongPressActive) {
+        timer.cancel(); // 停止定时器
+        return;
+      }
+      setState(() {
+        currentScrollStep += 5.0; // 每半秒增加滚动步长
+      });
+    });
+
+    Timer.periodic(const Duration(milliseconds: 50), (timer) {
+      if (!_isLongPressActive) {
+        timer.cancel(); // 停止定时器
+        _speedIncreaseTimer?.cancel(); // 停止速度增加定时器
+        return;
+      }
+      Offset scrollDelta = Offset.zero;
+      if (key == LogicalKeyboardKey.arrowUp) {
+        scrollDelta = Offset(0, -currentScrollStep); // 向上滚动
+      } else if (key == LogicalKeyboardKey.arrowDown) {
+        scrollDelta = Offset(0, currentScrollStep); // 向下滚动
+      } else if (key == LogicalKeyboardKey.arrowLeft) {
+        scrollDelta = Offset(-currentScrollStep, 0); // 向左滚动
+      } else if (key == LogicalKeyboardKey.arrowRight) {
+        scrollDelta = Offset(currentScrollStep, 0); // 向右滚动
+      }
+      _simulateMouseScroll(scrollDelta);
+    });
   }
 
   void _startContinuousMovement() {
@@ -220,6 +319,11 @@ class BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
     }
   }
 
+  double getMyToolbarHeight() {
+    //return kToolbarHeight;
+    return 0;
+  }
+
   void _updateTargetPosition() {
     Offset newTargetPosition = targetMousePosition + _velocity;
 
@@ -231,7 +335,7 @@ class BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
       newTargetPosition.dx.clamp(0, screenSize.width),
       newTargetPosition.dy.clamp(
         0,
-        screenSize.height + kToolbarHeight,
+        screenSize.height - getMyToolbarHeight(),
       ), // 允许移动到 AppBar 区域
     );
 
@@ -274,7 +378,7 @@ class BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
   }
 
   void _simulateMouseClick() {
-    final appBarHeight = kToolbarHeight; // AppBar 的标准高度
+    final appBarHeight = getMyToolbarHeight(); // AppBar 的标准高度
     Offset globalMousePosition = Offset(
       mousePosition.dx,
       mousePosition.dy + appBarHeight,
@@ -323,15 +427,6 @@ class BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
     }
   }
 
-  void _addToFavorites(String url) {
-    setState(() {
-      if (!_favorites.contains(url)) {
-        _favorites.add(url); // 添加到收藏列表
-        _saveFavoritesToDisk(); // 保存到磁盘
-      }
-    });
-  }
-
   void _toggleFavorite(String url) {
     setState(() {
       if (_favorites.contains(url)) {
@@ -355,6 +450,12 @@ class BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
     webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
   }
 
+  void _showMessage(String message) {
+    setState(() {
+      _message = message; // 更新消息内容
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     return PopScope(
@@ -369,13 +470,6 @@ class BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
           return;
         }
 
-        bool canGoBack = await webViewController!.canGoBack();
-        if (canGoBack) {
-          webViewController?.goBack();
-
-          return;
-        }
-
         final allowed = await _handlePop();
         if (allowed && mounted) {
           if (context.mounted) {
@@ -384,7 +478,6 @@ class BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
         }
       },
       child: Scaffold(
-        appBar: AppBar(title: Text("InAppWebView")),
         body: SafeArea(
           child: Stack(
             children: [
@@ -577,28 +670,16 @@ class BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
                       ),
                     ),
                   ),
-                  OverflowBar(
-                    alignment: MainAxisAlignment.center,
-                    children: <Widget>[
-                      ElevatedButton(
-                        child: Icon(Icons.arrow_back),
-                        onPressed: () {
-                          webViewController?.goBack();
-                        },
+                  Visibility(
+                    visible: _message != '',
+                    child: Container(
+                      color: Colors.black87, // 消息条背景颜色
+                      padding: const EdgeInsets.all(8.0),
+                      child: Text(
+                        _message,
+                        style: const TextStyle(color: Colors.white), // 消息文字颜色
                       ),
-                      ElevatedButton(
-                        child: Icon(Icons.arrow_forward),
-                        onPressed: () {
-                          webViewController?.goForward();
-                        },
-                      ),
-                      ElevatedButton(
-                        child: Icon(Icons.refresh),
-                        onPressed: () {
-                          webViewController?.reload();
-                        },
-                      ),
-                    ],
+                    ),
                   ),
                 ],
               ),
@@ -614,6 +695,14 @@ class BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
                       border: Border.all(color: Colors.red, width: 6), // 空心圆边框
                       shape: BoxShape.circle,
                     ),
+                    child:
+                        _isScrollMode
+                            ? Icon(
+                              Icons.open_with, // 上下左右箭头图标
+                              color: Colors.green,
+                              size: 18,
+                            )
+                            : null,
                   ),
                 ),
               ),
