@@ -54,15 +54,18 @@ class BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
   bool _isKeyPressed = false; // 标记按键是否被按下
   int _lastLeftKeyPressedAt = DateTime.now().millisecondsSinceEpoch;
   int _lastRightKeyPressedAt = DateTime.now().millisecondsSinceEpoch;
+  int _lastUpKeyPressedAt = DateTime.now().millisecondsSinceEpoch;
+  int _lastDownKeyPressedAt = DateTime.now().millisecondsSinceEpoch;
 
   bool _isEditing = false; // 标记是否处于编辑状态
-  String _labelText = "https://google.com"; // Label 显示的文本
+  String _labelText = "http://10.0.0.141:8200"; // Label 显示的文本
 
   List<String> _favorites = []; // 收藏的网址列表
 
   String? _favoritesFilePath; // 收藏文件路径
 
   bool _isScrollMode = false; // 标记是否处于滚动模式
+  bool _isWebViewMode = false;
 
   String _message = ""; // 用于显示的消息
 
@@ -149,6 +152,43 @@ class BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
 
   bool _handleKeyEvent(KeyEvent event) {
     if (event is KeyDownEvent) {
+      if (_isWebViewMode) {
+        if (event.logicalKey == LogicalKeyboardKey.arrowUp ||
+            event.logicalKey == LogicalKeyboardKey.arrowDown ||
+            event.logicalKey == LogicalKeyboardKey.arrowLeft ||
+            event.logicalKey == LogicalKeyboardKey.arrowRight ||
+            event.logicalKey == LogicalKeyboardKey.select) {
+          String keyCode;
+          switch (event.logicalKey) {
+            case LogicalKeyboardKey.arrowUp:
+              keyCode = 'ArrowUp';
+              break;
+            case LogicalKeyboardKey.arrowDown:
+              keyCode = 'ArrowDown';
+              break;
+            case LogicalKeyboardKey.arrowLeft:
+              keyCode = 'ArrowLeft';
+              break;
+            case LogicalKeyboardKey.arrowRight:
+              keyCode = 'ArrowRight';
+              break;
+            case LogicalKeyboardKey.select:
+              keyCode = 'Enter';
+              break;
+            default:
+              keyCode = '';
+          }
+          if (keyCode.isNotEmpty) {
+            webViewController?.evaluateJavascript(
+              source: """
+          var event = new KeyboardEvent('keydown', { key: '$keyCode', bubbles: true });
+          document.dispatchEvent(event);
+          """,
+            );
+          }
+        }
+      }
+
       if (event.logicalKey == LogicalKeyboardKey.arrowLeft) {
         _lastLeftKeyPressedAt = DateTime.now().millisecondsSinceEpoch;
       }
@@ -163,84 +203,222 @@ class BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
               now - _lastRightKeyPressedAt < 300)) ||
           event.logicalKey == LogicalKeyboardKey.browserFavorites) {
         setState(() {
-          _isScrollMode = !_isScrollMode; // 切换滚动模式
+          _isScrollMode = !_isScrollMode;
         });
       }
 
-      if (_isScrollMode) {
-        // 滚动模式下发送模拟鼠标滚动消息
-        if (!_isKeyPressed &&
-            (event.logicalKey == LogicalKeyboardKey.arrowUp ||
-                event.logicalKey == LogicalKeyboardKey.arrowDown ||
-                event.logicalKey == LogicalKeyboardKey.arrowLeft ||
-                event.logicalKey == LogicalKeyboardKey.arrowRight)) {
-          _isKeyPressed = true; // 标记按键被按下
-          _isLongPressActive = false; // 重置长按激活状态
+      if (!_isWebViewMode) {
+        if (_isScrollMode) {
+          // 滚动模式下发送模拟鼠标滚动消息
+          if (!_isKeyPressed &&
+              (event.logicalKey == LogicalKeyboardKey.arrowUp ||
+                  event.logicalKey == LogicalKeyboardKey.arrowDown ||
+                  event.logicalKey == LogicalKeyboardKey.arrowLeft ||
+                  event.logicalKey == LogicalKeyboardKey.arrowRight)) {
+            _isKeyPressed = true; // 标记按键被按下
+            _isLongPressActive = false; // 重置长按激活状态
 
-          // 启动定时器，半秒后激活长按持续滚动
-          _longPressTimer = Timer(const Duration(milliseconds: 500), () {
-            _isLongPressActive = true;
-            _startContinuousScroll(event.logicalKey);
-          });
+            // 启动定时器，半秒后激活长按持续滚动
+            _longPressTimer = Timer(const Duration(milliseconds: 500), () {
+              _isLongPressActive = true;
+              _startContinuousScroll(event.logicalKey);
+            });
+          }
+
+          Offset scrollDelta = Offset.zero;
+          if (event.logicalKey == LogicalKeyboardKey.arrowUp) {
+            scrollDelta = Offset(0, -10); // 向上滚动
+          } else if (event.logicalKey == LogicalKeyboardKey.arrowDown) {
+            scrollDelta = Offset(0, 10); // 向下滚动
+          } else if (event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+            scrollDelta = Offset(-10, 0); // 向左滚动
+          } else if (event.logicalKey == LogicalKeyboardKey.arrowRight) {
+            scrollDelta = Offset(10, 0); // 向右滚动
+          }
+          _simulateMouseScroll(scrollDelta);
+        } else {
+          if (!_isKeyPressed &&
+              (event.logicalKey == LogicalKeyboardKey.arrowUp ||
+                  event.logicalKey == LogicalKeyboardKey.arrowDown ||
+                  event.logicalKey == LogicalKeyboardKey.arrowLeft ||
+                  event.logicalKey == LogicalKeyboardKey.arrowRight)) {
+            _isKeyPressed = true; // 标记按键被按下
+            _isLongPressActive = false; // 重置长按激活状态
+
+            // 普通模式下执行原来的移动逻辑
+            setState(() {
+              _updateVelocity(event.logicalKey);
+              _updateTargetPosition();
+            });
+
+            // 启动定时器，半秒后激活长按持续移动
+            _longPressTimer = Timer(const Duration(milliseconds: 500), () {
+              _isLongPressActive = true;
+              _startContinuousMovement();
+            });
+          }
         }
 
-        Offset scrollDelta = Offset.zero;
-        if (event.logicalKey == LogicalKeyboardKey.arrowUp) {
-          scrollDelta = Offset(0, -10); // 向上滚动
-        } else if (event.logicalKey == LogicalKeyboardKey.arrowDown) {
-          scrollDelta = Offset(0, 10); // 向下滚动
-        } else if (event.logicalKey == LogicalKeyboardKey.arrowLeft) {
-          scrollDelta = Offset(-10, 0); // 向左滚动
-        } else if (event.logicalKey == LogicalKeyboardKey.arrowRight) {
-          scrollDelta = Offset(10, 0); // 向右滚动
-        }
-        _simulateMouseScroll(scrollDelta);
-      } else {
-        if (!_isKeyPressed &&
-            (event.logicalKey == LogicalKeyboardKey.arrowUp ||
-                event.logicalKey == LogicalKeyboardKey.arrowDown ||
-                event.logicalKey == LogicalKeyboardKey.arrowLeft ||
-                event.logicalKey == LogicalKeyboardKey.arrowRight)) {
-          _isKeyPressed = true; // 标记按键被按下
-          _isLongPressActive = false; // 重置长按激活状态
-
-          // 普通模式下执行原来的移动逻辑
-          setState(() {
+        setState(() {
+          if (event.logicalKey == LogicalKeyboardKey.arrowUp ||
+              event.logicalKey == LogicalKeyboardKey.arrowDown ||
+              event.logicalKey == LogicalKeyboardKey.arrowLeft ||
+              event.logicalKey == LogicalKeyboardKey.arrowRight) {
             _updateVelocity(event.logicalKey);
-            _updateTargetPosition();
-          });
+          }
+        });
 
-          // 启动定时器，半秒后激活长按持续移动
-          _longPressTimer = Timer(const Duration(milliseconds: 500), () {
-            _isLongPressActive = true;
-            _startContinuousMovement();
-          });
-        }
+        setState(() {
+          if (event.logicalKey == LogicalKeyboardKey.select) {
+            _simulateMouseClick();
+          }
+        });
       }
-
-      setState(() {
+    } else if (event is KeyUpEvent) {
+      if (_isWebViewMode) {
+        if (event.logicalKey == LogicalKeyboardKey.arrowUp ||
+            event.logicalKey == LogicalKeyboardKey.arrowDown ||
+            event.logicalKey == LogicalKeyboardKey.arrowLeft ||
+            event.logicalKey == LogicalKeyboardKey.arrowRight ||
+            event.logicalKey == LogicalKeyboardKey.select) {
+          String keyCode;
+          switch (event.logicalKey) {
+            case LogicalKeyboardKey.arrowUp:
+              keyCode = 'ArrowUp';
+              break;
+            case LogicalKeyboardKey.arrowDown:
+              keyCode = 'ArrowDown';
+              break;
+            case LogicalKeyboardKey.arrowLeft:
+              keyCode = 'ArrowLeft';
+              break;
+            case LogicalKeyboardKey.arrowRight:
+              keyCode = 'ArrowRight';
+              break;
+            case LogicalKeyboardKey.select:
+              keyCode = 'Enter';
+              break;
+            default:
+              keyCode = '';
+          }
+          if (keyCode.isNotEmpty) {
+            webViewController?.evaluateJavascript(
+              source: """
+          var event = new KeyboardEvent('keyup', { key: '$keyCode', bubbles: true });
+          document.dispatchEvent(event);
+          """,
+            );
+          }
+        }
+      } else {
+        // 原有逻辑保持不变
         if (event.logicalKey == LogicalKeyboardKey.arrowUp ||
             event.logicalKey == LogicalKeyboardKey.arrowDown ||
             event.logicalKey == LogicalKeyboardKey.arrowLeft ||
             event.logicalKey == LogicalKeyboardKey.arrowRight) {
-          _updateVelocity(event.logicalKey); // 更新速度
-        } else if (event.logicalKey == LogicalKeyboardKey.select) {
-          _simulateMouseClick(); // 保留 select 按键逻辑
+          _isKeyPressed = false; // 按键释放时重置标记
+          _isLongPressActive = false; // 停止长按激活状态
+          _longPressTimer?.cancel(); // 停止长按定时器
+          _speedIncreaseTimer?.cancel(); // 停止速度增加定时器
+          _velocity = Offset.zero; // 停止移动
         }
-      });
-    } else if (event is KeyUpEvent) {
-      if (event.logicalKey == LogicalKeyboardKey.arrowUp ||
-          event.logicalKey == LogicalKeyboardKey.arrowDown ||
-          event.logicalKey == LogicalKeyboardKey.arrowLeft ||
-          event.logicalKey == LogicalKeyboardKey.arrowRight) {
-        _isKeyPressed = false; // 按键释放时重置标记
-        _isLongPressActive = false; // 停止长按激活状态
-        _longPressTimer?.cancel(); // 停止长按定时器
-        _speedIncreaseTimer?.cancel(); // 停止速度增加定时器
-        _velocity = Offset.zero; // 停止移动
+      }
+
+      if (event.logicalKey == LogicalKeyboardKey.arrowUp) {
+        _lastUpKeyPressedAt = DateTime.now().millisecondsSinceEpoch;
+      }
+
+      if (event.logicalKey == LogicalKeyboardKey.arrowDown) {
+        _lastDownKeyPressedAt = DateTime.now().millisecondsSinceEpoch;
+      }
+
+      var now = DateTime.now().millisecondsSinceEpoch;
+
+      if ((now - _lastUpKeyPressedAt < 300 &&
+          now - _lastDownKeyPressedAt < 300)) {
+        setState(() {
+          _isWebViewMode = !_isWebViewMode; // 切换滚动模式
+          if (!_isWebViewMode) {
+            setState(() {
+              _isEditing = true; // 切换到编辑状态
+              textFieldFocusNode.requestFocus();
+            });
+          } else {
+            _setWebViewFocus();
+          }
+        });
       }
     }
+
     return false; // 返回 false 表示未拦截事件
+  }
+
+  Future<void> _handleBackKey() async {
+    print('Handling back key');
+    if (_isEditing) {
+      print('Exiting edit mode');
+      setState(() {
+        _isEditing = false;
+        textFieldFocusNode.unfocus();
+      });
+      return;
+    }
+
+    if (webViewController != null) {
+      try {
+        print('Checking canGoBack');
+        bool canGoBack = await webViewController!.canGoBack();
+        print('canGoBack: $canGoBack');
+        if (canGoBack) {
+          print('Going back');
+          await webViewController!.goBack();
+          return;
+        } else {
+          print('Calling window.goBack');
+          var result = await webViewController!.evaluateJavascript(
+            source: """
+          (function() {
+            if (typeof window.goBack === 'function') {
+              return window.goBack();
+            }
+            return null;
+          })();
+          """,
+          );
+          print('window.goBack result: $result');
+          // 修正返回值逻辑：假设 true 表示后退成功，false 或 null 表示失败
+          if (result == false) {
+            print('window.goBack succeeded');
+            return;
+          }
+        }
+      } catch (e) {
+        print('Error in _handleBackKey: $e');
+      }
+    } else {
+      print('webViewController is null');
+    }
+
+    print('Showing exit dialog');
+    final allowed = await _handlePop();
+    print('Dialog result: $allowed');
+    if (allowed && mounted && context.mounted) {
+      print('Exiting app');
+      SystemNavigator.pop();
+      // 备用退出方式（仅用于调试）
+      // exit(0);
+    } else {
+      if (_isWebViewMode) {
+        _simulateMouseClickEx(1, 100);
+      }
+    }
+  }
+
+  void _setWebViewFocus() {
+    textFieldFocusNode.unfocus();
+    FocusManager.instance.primaryFocus?.unfocus();
+
+    _simulateMouseClickEx(1, 100);
   }
 
   void _startContinuousScroll(LogicalKeyboardKey key) {
@@ -356,43 +534,135 @@ class BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
   }
 
   Future<bool> _handlePop() async {
+    print('Entering _handlePop');
+    if (_isEditing) {
+      print('Exiting edit mode from _handlePop');
+      setState(() {
+        _isEditing = false;
+        textFieldFocusNode.unfocus();
+      });
+      return false;
+    }
+
+    // 确保焦点已移除，防止干扰对话框
+    FocusManager.instance.primaryFocus?.unfocus();
+
+    // 使用新的 BuildContext 确保对话框稳定显示
     final confirm = await showDialog<bool>(
       context: context,
+      barrierDismissible: false, // 防止点击外部关闭
       builder:
-          (context) => AlertDialog(
-            title: const Text('确认退出？'),
-            content: const Text('确认要对退出吗?'),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context, false),
-                child: const Text('取消'),
-              ),
-              TextButton(
-                onPressed: () => Navigator.pop(context, true),
-                child: const Text('确定'),
-              ),
-            ],
+          (dialogContext) => WillPopScope(
+            onWillPop: () async => false, // 防止返回键关闭对话框
+            child: AlertDialog(
+              title: const Text('确认退出？'),
+              content: const Text('确认要退出吗？'),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    print('Dialog: Cancel pressed');
+                    Navigator.pop(dialogContext, false);
+                  },
+                  child: const Text('取消'),
+                ),
+                TextButton(
+                  onPressed: () {
+                    print('Dialog: Confirm pressed');
+                    Navigator.pop(dialogContext, true);
+                  },
+                  child: const Text('确定'),
+                ),
+              ],
+            ),
           ),
     );
-    return confirm ?? false; // 用户点击确定时返回true
+    print('Dialog confirm result: $confirm');
+    return confirm ?? false;
   }
 
   void _simulateMouseClick() {
-    final appBarHeight = getMyToolbarHeight(); // AppBar 的标准高度
-    Offset globalMousePosition = Offset(
-      mousePosition.dx,
-      mousePosition.dy + appBarHeight,
-    );
-    PointerEvent downPointer = PointerDownEvent(
-      pointer: 1,
-      position: globalMousePosition,
-    );
-    GestureBinding.instance.handlePointerEvent(downPointer);
-    PointerEvent upPointer = PointerUpEvent(
-      pointer: 1,
-      position: globalMousePosition,
-    );
-    GestureBinding.instance.handlePointerEvent(upPointer);
+    final mouseX = mousePosition.dx;
+    final mouseY = mousePosition.dy;
+
+    _simulateMouseClickEx(mouseX, mouseY);
+  }
+
+  void _simulateMouseClickEx(double mouseX, double mouseY) {
+    // 假设顶部 Row（包含 TextField 和 IconButton）的高度
+    const estimatedRowHeight = 56.0; // 根据你的 UI 调整此值
+
+    // 检查小红点是否在 Flutter UI 区域（顶部 Row）
+    if (mouseY < estimatedRowHeight || _isWebViewMode) {
+      print('Simulating Flutter UI click at: $mouseX, $mouseY');
+      // 模拟 Flutter 层的鼠标或手指点击
+      final globalMousePosition = Offset(mouseX, mouseY);
+      // 触发 pointerdown（模拟鼠标按下或触摸开始）
+      final downPointer = PointerDownEvent(
+        pointer: 1,
+        position: globalMousePosition,
+        kind: PointerDeviceKind.touch, // 模拟手指触摸（可改为 PointerDeviceKind.mouse）
+      );
+      GestureBinding.instance.handlePointerEvent(downPointer);
+      // 触发 pointerup（模拟鼠标释放或触摸结束）
+      final upPointer = PointerUpEvent(
+        pointer: 1,
+        position: globalMousePosition,
+        kind: PointerDeviceKind.touch,
+      );
+      GestureBinding.instance.handlePointerEvent(upPointer);
+      return;
+    }
+
+    // 小红点在 WebView 区域
+    if (webViewController != null) {
+      // 计算小红点在 WebView 中的坐标
+      final webViewX = mouseX;
+      final webViewY = mouseY - estimatedRowHeight;
+
+      print('Simulating WebView click at: $mouseX, $mouseY');
+      print('WebView coords: $webViewX, $webViewY');
+
+      // 使用 JavaScript 模拟鼠标或手指点击，绕过焦点
+      webViewController!.evaluateJavascript(
+        source: """
+      (function() {
+        var element = document.elementFromPoint(${webViewX}, ${webViewY});
+        if (element) {
+          console.log('Clicked element:', element);
+          // 模拟鼠标点击
+          var mousedownEvent = new MouseEvent('mousedown', {
+            bubbles: true,
+            cancelable: true,
+            clientX: ${webViewX},
+            clientY: ${webViewY},
+            button: 0 // 左键
+          });
+          element.dispatchEvent(mousedownEvent);
+
+          var mouseupEvent = new MouseEvent('mouseup', {
+            bubbles: true,
+            cancelable: true,
+            clientX: ${webViewX},
+            clientY: ${webViewY},
+            button: 0
+          });
+          element.dispatchEvent(mouseupEvent);
+
+          var clickEvent = new MouseEvent('click', {
+            bubbles: true,
+            cancelable: true,
+            clientX: ${webViewX},
+            clientY: ${webViewY},
+            button: 0
+          });
+          element.dispatchEvent(clickEvent);
+        } else {
+          console.log('No element found at point: ${webViewX}, ${webViewY}');
+        }
+      })();
+      """,
+      );
+    }
   }
 
   Future<void> _loadFavoritesFromDisk() async {
@@ -461,21 +731,8 @@ class BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, result) async {
-        if (didPop) return; // 已处理弹出则直接返回
-
-        if (_isEditing) {
-          setState(() {
-            _isEditing = false;
-          });
-          return;
-        }
-
-        final allowed = await _handlePop();
-        if (allowed && mounted) {
-          if (context.mounted) {
-            exit(0);
-          }
-        }
+        if (didPop) return;
+        await _handleBackKey();
       },
       child: Scaffold(
         body: SafeArea(
@@ -696,7 +953,9 @@ class BrowserState extends State<Browser> with SingleTickerProviderStateMixin {
                       shape: BoxShape.circle,
                     ),
                     child:
-                        _isScrollMode
+                        _isWebViewMode
+                            ? Icon(Icons.web, color: Colors.green, size: 18)
+                            : _isScrollMode
                             ? Icon(
                               Icons.open_with, // 上下左右箭头图标
                               color: Colors.green,
